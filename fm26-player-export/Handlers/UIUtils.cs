@@ -1,4 +1,5 @@
 using System.Collections.Generic;
+using System.Globalization;
 using System.Text;
 using System.Text.RegularExpressions;
 using UnityEngine.UIElements;
@@ -30,24 +31,38 @@ namespace FM26PlayerExport.Handlers
             return key;
         }
 
-        public static string GetText(VisualElement el)
+        public static string GetText(
+            VisualElement el,
+            bool allowRenderedTextFallback = true,
+            bool allowTooltipFallback = true)
         {
             if (el == null) return null;
             try { var te = el.TryCast<TextElement>(); if (te != null && !string.IsNullOrWhiteSpace(te.text)) return StripHtml(te.text.Trim()); } catch { }
             try { var lb = el.TryCast<Label>();       if (lb != null && !string.IsNullOrWhiteSpace(lb.text)) return StripHtml(lb.text.Trim()); } catch { }
-            try { var tip = el.tooltip;               if (!string.IsNullOrWhiteSpace(tip)) return StripHtml(tip.Trim()); } catch { }
+            if (allowTooltipFallback)
+            {
+                try { var tip = el.tooltip; if (!string.IsNullOrWhiteSpace(tip)) return StripHtml(tip.Trim()); } catch { }
+            }
             return null;
         }
 
         public static string StripHtml(string s)
             => string.IsNullOrEmpty(s) ? s : Regex.Replace(s, "<[^>]+>", string.Empty).Trim();
 
-        public static string CollectFirstText(VisualElement el, int d = 0)
+        public static string CollectFirstText(
+            VisualElement el,
+            int d = 0,
+            bool allowRenderedTextFallback = true,
+            bool allowTooltipFallback = true)
         {
             if (el == null || d > 20) return null;
-            var t = GetText(el);
+            var t = GetText(el, allowRenderedTextFallback, allowTooltipFallback);
             if (t != null) return t;
-            for (int i = 0; i < el.childCount; i++) { var r = CollectFirstText(el.ElementAt(i), d+1); if (r != null) return r; }
+            for (int i = 0; i < el.childCount; i++)
+            {
+                var r = CollectFirstText(el.ElementAt(i), d + 1, allowRenderedTextFallback, allowTooltipFallback);
+                if (r != null) return r;
+            }
             return null;
         }
         
@@ -59,57 +74,126 @@ namespace FM26PlayerExport.Handlers
             return null;
         }
 
-        public static string CollectAllTextsJoined(VisualElement el, int d = 0)
+        public static string CollectAllTextsJoined(
+            VisualElement el,
+            int d = 0,
+            bool allowRenderedTextFallback = true,
+            bool allowTooltipFallback = true)
         {
             if (el == null || d > 20) return "";
             var list = new List<string>();
-            CollectAllTexts(el, list, 0);
+            CollectAllTexts(el, list, 0, allowRenderedTextFallback, allowTooltipFallback);
             return string.Join(" ", list).Trim();
         }
 
-        public static void CollectAllTexts(VisualElement el, List<string> out_, int d = 0)
+        public static void CollectAllTexts(
+            VisualElement el,
+            List<string> out_,
+            int d = 0,
+            bool allowRenderedTextFallback = true,
+            bool allowTooltipFallback = true)
         {
             if (el == null || d > 20) return;
-            var t = GetText(el);
+            var t = GetText(el, allowRenderedTextFallback, allowTooltipFallback);
             if (t != null && !out_.Contains(t)) out_.Add(t);
-            try { var tip = el.tooltip; if (!string.IsNullOrWhiteSpace(tip)) { var ts = StripHtml(tip.Trim()); if (!out_.Contains(ts)) out_.Add(ts); } } catch { }
-            for (int i = 0; i < el.childCount; i++) CollectAllTexts(el.ElementAt(i), out_, d+1);
+            if (allowTooltipFallback)
+            {
+                try
+                {
+                    var tip = el.tooltip;
+                    if (!string.IsNullOrWhiteSpace(tip))
+                    {
+                        var ts = StripHtml(tip.Trim());
+                        if (!out_.Contains(ts)) out_.Add(ts);
+                    }
+                }
+                catch { }
+            }
+            for (int i = 0; i < el.childCount; i++)
+                CollectAllTexts(el.ElementAt(i), out_, d + 1, allowRenderedTextFallback, allowTooltipFallback);
         }
 
+        public static StarRatingResult TryReadStarRating(VisualElement cell)
+        {
+            var starClassLists = new List<List<string>>();
+            CollectStarClassLists(cell, cell, starClassLists, 0);
+            if (starClassLists.Count == 0) return null;
 
+            if (!StarRatingParser.TryParseRating(starClassLists, out StarRatingResult rating))
+            {
+                Plugin.Log.LogWarning($"[FM26Export] Unrecognised star cell structure; exporting blank. Classes: {string.Join(" | ", starClassLists.ConvertAll(classes => string.Join(",", classes)))}");
+                return null;
+            }
+
+            return rating;
+        }
 
         public static string TryReadStars(VisualElement cell)
         {
-            try { string tip = cell.tooltip; if (!string.IsNullOrEmpty(tip) && double.TryParse(tip, out double _)) return tip; } catch {}
-            int filled = 0, half = 0, total = 0;
-            CountStars(cell, ref filled, ref half, ref total, 0);
-            if (total == 0) return null;
-            float val = filled + half * 0.5f;
-            if (val <= 0) return string.Empty;
-            return val.ToString("0.#", System.Globalization.CultureInfo.InvariantCulture).Replace(".", ",");
+            var rating = TryReadStarRating(cell);
+            return rating == null ? null : FormatStarRating(rating.DisplayedStars, true);
         }
 
-        private static void CountStars(VisualElement el, ref int filled, ref int half, ref int total, int d)
+        public static string FormatStarRating(float rating, bool blankWhenZero)
         {
-            if (el == null || d > 12) return;
+            if (blankWhenZero && rating <= 0f) return string.Empty;
+            return rating.ToString("0.#", CultureInfo.InvariantCulture).Replace(".", ",");
+        }
+
+        private static bool IsVisibleForStarRead(VisualElement element, VisualElement cell)
+        {
+            VisualElement current = element;
+            while (current != null)
+            {
+                try
+                {
+                    if (current.resolvedStyle.display == DisplayStyle.None
+                        || current.resolvedStyle.visibility == Visibility.Hidden
+                        || current.resolvedStyle.opacity <= 0f)
+                    {
+                        return false;
+                    }
+                }
+                catch
+                {
+                }
+
+                if (current == cell)
+                    break;
+
+                current = current.parent;
+            }
+
+            return true;
+        }
+
+        private static void CollectStarClassLists(
+            VisualElement element,
+            VisualElement cell,
+            List<List<string>> starClassLists,
+            int depth)
+        {
+            if (element == null || depth > 12) return;
+
+            if (!IsVisibleForStarRead(element, cell))
+                return;
+
             try
             {
-                bool isStar = false, isFilled = false, isHalf = false;
-                for (int c = 0; c < el.classList.Count; c++)
+                var classes = new List<string>();
+                for (int i = 0; i < element.classList.Count; i++)
+                    classes.Add(element.classList[i]);
+
+                if (element.childCount == 0
+                    && StarRatingParser.Classify(classes) != StarVisualState.NotStar)
                 {
-                    string cls = el.classList[c].ToLower();
-                    if (cls.Contains("star") || cls.Contains("ability") || cls.Contains("rating")) isStar = true;
-                    if (cls.Contains("filled") || cls.Contains("active") || cls.Contains("full") || cls.Contains("on")) isFilled = true;
-                    if (cls.Contains("half")) isHalf = true;
+                    starClassLists.Add(classes);
                 }
-                if (isStar && el.childCount == 0)
-                {
-                    total++;
-                    if (isHalf) half++;
-                    else if (isFilled) filled++;
-                }
-            } catch { }
-            for (int i = 0; i < el.childCount; i++) CountStars(el.ElementAt(i), ref filled, ref half, ref total, d+1);
+            }
+            catch { }
+
+            for (int i = 0; i < element.childCount; i++)
+                CollectStarClassLists(element.ElementAt(i), cell, starClassLists, depth + 1);
         }
 
         public static string RowKey(List<string> vals)
